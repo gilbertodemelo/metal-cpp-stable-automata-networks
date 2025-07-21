@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <omp.h>
 #include "load_data.hpp"  // ✅ Nosso loader
 
 #define NS_PRIVATE_IMPLEMENTATION
@@ -15,6 +16,44 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+
+
+// === Gera todas as matrizes de adjacência para n <= 5 ==
+// === ou uma amostra para n > 5 ==
+
+uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size=1000000) {
+
+    if (n <= 5) {
+
+        size_t total = 1ULL << (n * n);
+        *out_count = total;
+
+        u_int8_t ***matrices = new uint8_t ** [total];
+
+        // utilizar OpenMP para gerar as matrizes
+        #pragma omp parallel for schedule(static) {
+            for (size_t k = 0; k < total; k++) {
+
+                uint8_t **matrix = new uint8_t * [n];
+                for(int i = 0; i < n; i++) {
+                    matrix[i] = new uint8_t[n];
+                }
+            
+
+            for (int i = 0; i < n * n; i++) {
+                int row = i / n;
+                int col = i % n;
+                matrix[row][col] = (k >> (n * n - 1 - i)) & 1;
+            }
+
+            matrices[k] = matrix;
+        }
+        
+    }
+
+    return matrices;
+
+}
 
 // === Gera todas as configurações binárias possíveis de n bits ===
 std::vector<int> generateAllBinaryConfigs(uint32_t n) {
