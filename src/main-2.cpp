@@ -24,21 +24,19 @@
 uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size=1000000) {
 
     if (n <= 5) {
-
         size_t total = 1ULL << (n * n);
         *out_count = total;
 
-        u_int8_t ***matrices = new uint8_t ** [total];
+        uint8_t ***matrices = new uint8_t ** [total];
 
         // utilizar OpenMP para gerar as matrizes
-        #pragma omp parallel for schedule(static) {
-            for (size_t k = 0; k < total; k++) {
+        #pragma omp parallel for schedule(static)
+        for (size_t k = 0; k < total; k++) {
 
-                uint8_t **matrix = new uint8_t * [n];
-                for(int i = 0; i < n; i++) {
-                    matrix[i] = new uint8_t[n];
-                }
-            
+            uint8_t **matrix = new uint8_t * [n];
+            for(int i = 0; i < n; i++) {
+                matrix[i] = new uint8_t[n];
+            }
 
             for (int i = 0; i < n * n; i++) {
                 int row = i / n;
@@ -48,12 +46,15 @@ uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size=100000
 
             matrices[k] = matrix;
         }
-        
+
+        return matrices;
     }
 
-    return matrices;
-
+    // caso n > 5 (ainda não implementado)
+    *out_count = sample_size;
+    return nullptr;
 }
+
 
 // === Gera todas as configurações binárias possíveis de n bits ===
 std::vector<int> generateAllBinaryConfigs(uint32_t n) {
