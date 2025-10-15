@@ -3,14 +3,14 @@ using namespace metal;
 
 // ALTERADO: Assinatura do Kernel
 kernel void countConsensusConfigs(
-    device const int   *allMatrices    [[ buffer(0) ]], // ALTERADO: agora são todas as matrizes
-    device const int   *configs        [[ buffer(1) ]],
-    device atomic_uint *results        [[ buffer(2) ]], // ALTERADO: agora é um array de resultados
-    constant uint      &nodeCount      [[ buffer(3) ]],
-    constant uint      &numConfigs     [[ buffer(4) ]],
-    constant uint      &numSteps       [[ buffer(5) ]],
-    constant uint      &numGraphs      [[ buffer(6) ]], // NOVO: número total de grafos
-    uint                gid            [[ thread_position_in_grid ]]
+        device const int   *allMatrices    [[ buffer(0) ]],
+        device const int   *configs        [[ buffer(1) ]],
+        device atomic_uint *results        [[ buffer(2) ]],
+        constant uint      &nodeCount      [[ buffer(3) ]],
+        constant uint      &numConfigs     [[ buffer(4) ]],
+        constant uint      &numSteps       [[ buffer(5) ]],
+        constant uint      &numGraphs      [[ buffer(6) ]],
+        uint                gid            [[ thread_position_in_grid ]]
 )
 {
     // NOVO: Calcula o índice do grafo e da configuração para esta thread
@@ -78,3 +78,18 @@ kernel void countConsensusConfigs(
     // ALTERADO: incrementa o contador atômico na posição correta do array de resultados
     atomic_fetch_add_explicit(&results[graph_idx], 1u, memory_order_relaxed);
 }
+
+kernel void markStableGraphs(
+        device const atomic_uint *results     [[ buffer(0) ]],
+device atomic_uint       *stableFlags [[ buffer(1) ]],
+constant uint            &numConfigs  [[ buffer(2) ]],
+constant uint            &numGraphs   [[ buffer(3) ]],
+uint                      gid         [[ thread_position_in_grid ]]
+) {
+if (gid >= numGraphs) return;
+uint count = atomic_load_explicit(&results[gid], memory_order_relaxed);
+atomic_store_explicit(&stableFlags[gid],
+(count == numConfigs) ? 1u : 0u,
+memory_order_relaxed);
+}
+

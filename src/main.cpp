@@ -7,7 +7,7 @@
 #include <cmath>
 #include <fstream>
 #include <omp.h>
-#include "load_data.hpp"  // ✅ Nosso loader
+#include "load_data.hpp"
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -18,39 +18,28 @@
 #include <QuartzCore/QuartzCore.hpp>
 
 
-// === Gera todas as matrizes de adjacência para n <= 5 ==
-// === ou uma amostra para n > 5 ==
-
-uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size=1000000) {
-
+// === Gera todas as matrizes de adjacência para n <= 5 ===
+uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size = 1000000) {
     if (n <= 5) {
         size_t total = 1ULL << (n * n);
         *out_count = total;
+        uint8_t ***matrices = new uint8_t **[total];
 
-        uint8_t ***matrices = new uint8_t ** [total];
-
-        // utilizar OpenMP para gerar as matrizes
-        #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
         for (size_t k = 0; k < total; k++) {
-
-            uint8_t **matrix = new uint8_t * [n];
-            for(int i = 0; i < n; i++) {
+            uint8_t **matrix = new uint8_t *[n];
+            for (int i = 0; i < n; i++)
                 matrix[i] = new uint8_t[n];
-            }
 
             for (int i = 0; i < n * n; i++) {
                 int row = i / n;
                 int col = i % n;
                 matrix[row][col] = (k >> (n * n - 1 - i)) & 1;
             }
-
             matrices[k] = matrix;
         }
-
         return matrices;
     }
-
-    // caso n > 5 (ainda não implementado)
     *out_count = sample_size;
     return nullptr;
 }
@@ -58,107 +47,109 @@ uint8_t ***generate_matrices(int n, size_t *out_count, size_t sample_size=100000
 
 // === Gera todas as configurações binárias possíveis de n bits ===
 std::vector<int> generateAllBinaryConfigs(uint32_t n) {
-    uint32_t totalConfigs = 1u << n;  // 2^n
+    uint32_t totalConfigs = 1u << n;
     std::vector<int> configs;
     configs.reserve((size_t)totalConfigs * n);
 
-    for (uint32_t i = 0; i < totalConfigs; ++i) {
-        for (uint32_t bit = 0; bit < n; ++bit) {
-            int value = (i >> (n - 1 - bit)) & 1;
-            configs.push_back(value);
-        }
-    }
+    for (uint32_t i = 0; i < totalConfigs; ++i)
+        for (uint32_t bit = 0; bit < n; ++bit)
+            configs.push_back((i >> (n - 1 - bit)) & 1);
 
     return configs;
 }
 
-// === Função para rodar o kernel de consenso ===
+
+// === Kernel GPU com os dois estágios ===
 void gpuConsensusSimulationBatch(MTL::Device* device,
-                                 const std::vector<int>& allMatricesFlat, // NOVO
+                                 const std::vector<int>& allMatricesFlat,
                                  const std::vector<int>& configs,
-                                 std::vector<uint32_t>& results, // NOVO: para receber os resultados
+                                 std::vector<uint32_t>& results,
+                                 std::vector<uint32_t>& stableFlags,
                                  uint32_t nodeCount,
                                  uint32_t numConfigs,
-                                 uint32_t numGraphs, // NOVO
+                                 uint32_t numGraphs,
                                  uint32_t numSteps) {
-
     using namespace MTL;
     using namespace NS;
 
     assert(device);
 
-    CommandQueue* commandQueue = device->newCommandQueue();
-    Library* library = device->newDefaultLibrary();
-    if (!library) {
-        std::cerr << "Erro: não foi possível carregar a Metal library!" << std::endl;
-        return;
-    }
-
-    Function* function = library->newFunction(
-        String::string("countConsensusConfigs", UTF8StringEncoding)
-    );
+    auto commandQueue = device->newCommandQueue();
     NS::Error* error = nullptr;
-    ComputePipelineState* pipeline = device->newComputePipelineState(function, &error);
-    if (!pipeline) {
-        std::cerr << "Erro ao criar o pipeline: "
-                  << error->localizedDescription()->utf8String() << std::endl;
+    auto lib = device->newLibrary(NS::String::string("build/default.metallib", NS::UTF8StringEncoding), &error);
+    if (!lib) {
+        std::cerr << "Erro ao carregar Metal library: " << error->localizedDescription()->utf8String() << "\n";
         return;
     }
 
-    // ALTERADO: Tamanhos dos buffers para conter TODOS os dados
-    size_t allMatricesSize = sizeof(int) * allMatricesFlat.size();
-    size_t configsSize = sizeof(int) * configs.size();
-    size_t resultsSize = sizeof(uint32_t) * numGraphs;
+    auto f_count = lib->newFunction(NS::String::string("countConsensusConfigs", NS::UTF8StringEncoding));
+    auto f_mark  = lib->newFunction(NS::String::string("markStableGraphs", NS::UTF8StringEncoding));
+    auto p_count = device->newComputePipelineState(f_count, &error);
+    auto p_mark  = device->newComputePipelineState(f_mark, &error);
 
-    // ALTERADO: Nomes dos buffers para refletir o conteúdo
-    Buffer* allMatricesBuf = device->newBuffer(allMatricesSize, ResourceStorageModeShared);
-    Buffer* configsBuf = device->newBuffer(configsSize, ResourceStorageModeShared);
-    Buffer* resultsBuf = device->newBuffer(resultsSize, ResourceStorageModeShared); // Era countBuf
+    size_t allMatricesSize = sizeof(int) * allMatricesFlat.size();
+    size_t configsSize     = sizeof(int) * configs.size();
+    size_t resultsSize     = sizeof(uint32_t) * numGraphs;
+    size_t stableSize      = sizeof(uint32_t) * numGraphs;
+
+    auto allMatricesBuf = device->newBuffer(allMatricesSize, ResourceStorageModeShared);
+    auto configsBuf     = device->newBuffer(configsSize, ResourceStorageModeShared);
+    auto resultsBuf     = device->newBuffer(resultsSize, ResourceStorageModeShared);
+    auto stableBuf      = device->newBuffer(stableSize, ResourceStorageModeShared);
 
     memcpy(allMatricesBuf->contents(), allMatricesFlat.data(), allMatricesSize);
     memcpy(configsBuf->contents(), configs.data(), configsSize);
-    memset(resultsBuf->contents(), 0, resultsSize); // Zera o buffer de resultados
+    memset(resultsBuf->contents(), 0, resultsSize);
+    memset(stableBuf->contents(),  0, stableSize);
 
-    CommandBuffer* commandBuffer = commandQueue->commandBuffer();
-    ComputeCommandEncoder* encoder = commandBuffer->computeCommandEncoder();
+    auto commandBuffer = commandQueue->commandBuffer();
 
-    encoder->setComputePipelineState(pipeline);
-    // ALTERADO: Mapeamento dos buffers
-    encoder->setBuffer(allMatricesBuf, 0, 0); // Todas as matrizes no buffer 0
+    // === Kernel 1 ===
+    auto encoder = commandBuffer->computeCommandEncoder();
+    encoder->setComputePipelineState(p_count);
+    encoder->setBuffer(allMatricesBuf, 0, 0);
     encoder->setBuffer(configsBuf,     0, 1);
-    encoder->setBuffer(resultsBuf,     0, 2); // Buffer de resultados no slot 2
+    encoder->setBuffer(resultsBuf,     0, 2);
+    encoder->setBytes(&nodeCount,  sizeof(uint32_t), 3);
+    encoder->setBytes(&numConfigs, sizeof(uint32_t), 4);
+    encoder->setBytes(&numSteps,   sizeof(uint32_t), 5);
+    encoder->setBytes(&numGraphs,  sizeof(uint32_t), 6);
 
-    // ALTERADO: Passando os novos parâmetros para o kernel
-    encoder->setBytes(&nodeCount,    sizeof(uint32_t), 3);
-    encoder->setBytes(&numConfigs,   sizeof(uint32_t), 4);
-    encoder->setBytes(&numSteps,     sizeof(uint32_t), 5);
-    encoder->setBytes(&numGraphs,    sizeof(uint32_t), 6); // NOVO: Passa o número de grafos
-
-    // ALTERADO: O grid agora é muito maior para cobrir todos os grafos e configs
     uint32_t totalThreads = numGraphs * numConfigs;
-    uint32_t maxThreads = pipeline->maxTotalThreadsPerThreadgroup();
-    uint32_t groupSize = std::min(maxThreads, 256u); // Pode aumentar um pouco o groupSize
-    
-    MTL::Size gridSize(totalThreads, 1, 1);
-    MTL::Size threadGroupSize(groupSize, 1, 1);
-    encoder->dispatchThreads(gridSize, threadGroupSize);
-
+    uint32_t groupSize = std::min<uint32_t>(
+            static_cast<uint32_t>(p_count->maxTotalThreadsPerThreadgroup()), 256u);
+    encoder->dispatchThreads(MTL::Size(totalThreads, 1, 1), MTL::Size(groupSize, 1, 1));
     encoder->endEncoding();
+
+    // === Kernel 2 ===
+    auto encoder2 = commandBuffer->computeCommandEncoder();
+    encoder2->setComputePipelineState(p_mark);
+    encoder2->setBuffer(resultsBuf, 0, 0);
+    encoder2->setBuffer(stableBuf,  0, 1);
+    encoder2->setBytes(&numConfigs, sizeof(uint32_t), 2);
+    encoder2->setBytes(&numGraphs,  sizeof(uint32_t), 3);
+
+    uint32_t groupSize2 = std::min<uint32_t>(static_cast<uint32_t> (p_mark->maxTotalThreadsPerThreadgroup()), 256u);
+    encoder2->dispatchThreads(MTL::Size(numGraphs, 1, 1), MTL::Size(groupSize2, 1, 1));
+    encoder2->endEncoding();
+
     commandBuffer->commit();
-    commandBuffer->waitUntilCompleted(); // Espera UMA VEZ por todo o trabalho
+    commandBuffer->waitUntilCompleted();
 
-    // NOVO: Copia o array de resultados de volta para o vetor da CPU
     memcpy(results.data(), resultsBuf->contents(), resultsSize);
+    memcpy(stableFlags.data(), stableBuf->contents(), stableSize);
 
-    // Limpeza
     allMatricesBuf->release();
     configsBuf->release();
     resultsBuf->release();
-    pipeline->release();
-    function->release();
-    library->release();
+    stableBuf->release();
+    p_count->release();
+    p_mark->release();
+    f_count->release();
+    f_mark->release();
+    lib->release();
     commandQueue->release();
-    commandBuffer->release(); // commandBuffer e encoder não precisam ser liberados
+    commandBuffer->release();
 }
 
 
@@ -166,7 +157,7 @@ void gpuConsensusSimulationBatch(MTL::Device* device,
 int main() {
     MTL::Device* device = MTL::CreateSystemDefaultDevice();
     if (!device) {
-        std::cerr << "Metal não é suportado neste dispositivo." << std::endl;
+        std::cerr << "Metal não é suportado neste dispositivo.\n";
         return 1;
     }
 
@@ -175,61 +166,50 @@ int main() {
     std::cin >> nodeCount;
 
     uint32_t numSteps = (1u << nodeCount) + 1u;
-
     std::vector<int> configs = generateAllBinaryConfigs(nodeCount);
-    uint32_t numConfigs = static_cast<uint32_t>(configs.size() / nodeCount);
+    uint32_t numConfigs = configs.size() / nodeCount;
 
     std::string filename = "./data/UniqueGraphs_n" + std::to_string(nodeCount) + ".bin";
     std::vector<std::vector<int>> allMatrices = loadAdjacencyMatrices(filename, nodeCount);
-    uint32_t numGraphs = allMatrices.size(); // NOVO
+    uint32_t numGraphs = allMatrices.size();
 
     std::cout << "\n🔢 Total de grafos carregados: " << numGraphs << "\n";
-    std::cout << "⚙️  Total de configurações possíveis por grafo: " << numConfigs << "\n\n";
+    std::cout << "⚙️  Total de configurações por grafo: " << numConfigs << "\n\n";
 
-    // NOVO: Achatando todas as matrizes em um único vetor
     std::vector<int> allMatricesFlat;
     allMatricesFlat.reserve(numGraphs * nodeCount * nodeCount);
-    for (const auto& matrix : allMatrices) {
+    for (const auto& matrix : allMatrices)
         allMatricesFlat.insert(allMatricesFlat.end(), matrix.begin(), matrix.end());
-    }
 
-    // NOVO: Vetor para guardar os resultados de todos os grafos
     std::vector<uint32_t> results(numGraphs);
-    
-    // ALTERADO: Chamada única à GPU
-    std::cout << "🚀 Enviando todos os " << numGraphs << " grafos para a GPU de uma vez...\n";
+    std::vector<uint32_t> stableFlags(numGraphs);
+
+    std::cout << "🚀 Enviando " << numGraphs << " grafos para GPU...\n";
     auto start = std::chrono::high_resolution_clock::now();
-    gpuConsensusSimulationBatch(
-        device, allMatricesFlat, configs, results,
-        nodeCount, numConfigs, numGraphs, numSteps
-    );
+    gpuConsensusSimulationBatch(device, allMatricesFlat, configs, results, stableFlags,
+                                nodeCount, numConfigs, numGraphs, numSteps);
     auto end = std::chrono::high_resolution_clock::now();
-    std::cout << "✅ Processamento GPU concluído.\n";
-    std::cout << "⏱️  Tempo total GPU: "
+
+    std::cout << "✅ GPU concluído em "
               << std::chrono::duration<double>(end - start).count() << " s\n\n";
 
-
-    // ALTERADO: O loop agora serve apenas para processar os resultados já calculados
     std::vector<uint32_t> distribution(numConfigs + 1, 0);
     uint32_t totalEstaveis = 0;
-    
+
     std::ofstream allGraphsCSV("./data/results/all_graphs_" + std::to_string(nodeCount) + "n.csv");
     if (!allGraphsCSV) {
-        std::cerr << "Erro ao criar o arquivo de todos os grafos!\n";
+        std::cerr << "Erro ao criar CSV!\n";
         return 1;
     }
 
     std::cout << "📊 Processando resultados...\n";
     for (size_t i = 0; i < numGraphs; ++i) {
-        uint32_t convergentes = results[i]; // Pega o resultado do vetor
-
+        uint32_t convergentes = results[i];
+        uint32_t isStable = stableFlags[i];
         distribution[convergentes]++;
-        if (convergentes == numConfigs) {
-            totalEstaveis++;
-        }
+        if (isStable) totalEstaveis++;
 
         const std::vector<int>& matrix = allMatrices[i];
-        // ... (o código para salvar em CSV não muda) ...
         allGraphsCSV << "[";
         for (uint32_t row = 0; row < nodeCount; ++row) {
             allGraphsCSV << "[";
@@ -243,40 +223,21 @@ int main() {
             if (row < nodeCount - 1)
                 allGraphsCSV << ",";
         }
-        allGraphsCSV << "]," << ((convergentes == numConfigs) ? 1 : 0) << "\n";
+        allGraphsCSV << "]," << (isStable ? 1 : 0) << "\n";
     }
 
     allGraphsCSV.close();
-    std::cout << "✔️ Arquivo com todos os grafos salvo em: ./data/results/all_graphs_"
-              << nodeCount << "n.csv\n";
-    
-    // ... (o resto do código para imprimir a distribuição e salvar a tabela não muda) ...
-    std::cout << "=============================" << std::endl;
-    std::cout << "📊 Total de grafos totalmente estáveis: "
-              << totalEstaveis << " de " << numGraphs << std::endl;
-    std::cout << "🧠 Critério: convergência com todas as " << numConfigs << " configurações iniciais" << std::endl;
+    std::cout << "✔️ CSV salvo em ./data/results/all_graphs_" << nodeCount << "n.csv\n";
+    std::cout << "📊 Total estáveis: " << totalEstaveis << " de " << numGraphs << "\n";
 
-    std::cout << "\n📊 Distribuição de convergência:\nQuantity,Frequency\n";
-    for (uint32_t x = 0; x <= numConfigs; ++x) {
-        uint32_t freq = distribution[x];
-        if (freq == 0) continue;
-        std::cout << x << "," << freq << std::endl;
-    }
+    std::ofstream freqCSV("./data/frequency_table_" + std::to_string(nodeCount) + "n.csv");
+    freqCSV << "Quantity,Frequency\n";
+    for (uint32_t k = 0; k <= numConfigs; ++k)
+        if (distribution[k] > 0)
+            freqCSV << k << "," << distribution[k] << "\n";
+    freqCSV.close();
 
-    {
-        std::string name = "./data/frequency_table_" + std::to_string(nodeCount) + "n.csv";
-        std::ofstream csv(name);
-        if (!csv) {
-            std::cerr << "Erro ao criar arquivo CSV\n";
-        } else {
-            csv << "Quantity,Frequency\n";
-            for (uint32_t k = 0; k <= numConfigs; ++k) {
-                csv << k << "," << distribution[k] << "\n";
-            }
-            csv.close();
-            std::cout << "✔️ Tabela de frequências salva em frequency_table.csv\n";
-        }
-    }
+    std::cout << "✔️ Tabela de frequências salva.\n";
 
     device->release();
     return 0;
