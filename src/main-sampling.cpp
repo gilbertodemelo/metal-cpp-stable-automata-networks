@@ -121,7 +121,7 @@ void gpuConsensusSimulationBatch(MTL::Device* device,
     commandBuffer->release(); // commandBuffer e encoder não precisam ser liberados
 }
 
-// === MAIN ===
+
 // === MAIN ===
 int main() {
     MTL::Device* device = MTL::CreateSystemDefaultDevice();
